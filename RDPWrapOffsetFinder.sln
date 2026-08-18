@@ -12,24 +12,34 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "RDPWrapOffsetFinder_nosymbo
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|ARM64 = Debug|ARM64
 		Debug|x64 = Debug|x64
 		Debug|x86 = Debug|x86
+		Release|ARM64 = Release|ARM64
 		Release|x64 = Release|x64
 		Release|x86 = Release|x86
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{D2323458-81A7-481D-82DA-B57906C8AAFC}.Debug|ARM64.ActiveCfg = Debug|ARM64
+		{D2323458-81A7-481D-82DA-B57906C8AAFC}.Debug|ARM64.Build.0 = Debug|ARM64
 		{D2323458-81A7-481D-82DA-B57906C8AAFC}.Debug|x64.ActiveCfg = Debug|x64
 		{D2323458-81A7-481D-82DA-B57906C8AAFC}.Debug|x64.Build.0 = Debug|x64
 		{D2323458-81A7-481D-82DA-B57906C8AAFC}.Debug|x86.ActiveCfg = Debug|Win32
 		{D2323458-81A7-481D-82DA-B57906C8AAFC}.Debug|x86.Build.0 = Debug|Win32
+		{D2323458-81A7-481D-82DA-B57906C8AAFC}.Release|ARM64.ActiveCfg = Release|ARM64
+		{D2323458-81A7-481D-82DA-B57906C8AAFC}.Release|ARM64.Build.0 = Release|ARM64
 		{D2323458-81A7-481D-82DA-B57906C8AAFC}.Release|x64.ActiveCfg = Release|x64
 		{D2323458-81A7-481D-82DA-B57906C8AAFC}.Release|x64.Build.0 = Release|x64
 		{D2323458-81A7-481D-82DA-B57906C8AAFC}.Release|x86.ActiveCfg = Release|Win32
 		{D2323458-81A7-481D-82DA-B57906C8AAFC}.Release|x86.Build.0 = Release|Win32
+		{521FD0FA-1D49-468F-84CF-B3348508D624}.Debug|ARM64.ActiveCfg = Debug|ARM64
+		{521FD0FA-1D49-468F-84CF-B3348508D624}.Debug|ARM64.Build.0 = Debug|ARM64
 		{521FD0FA-1D49-468F-84CF-B3348508D624}.Debug|x64.ActiveCfg = Debug|x64
 		{521FD0FA-1D49-468F-84CF-B3348508D624}.Debug|x64.Build.0 = Debug|x64
 		{521FD0FA-1D49-468F-84CF-B3348508D624}.Debug|x86.ActiveCfg = Debug|Win32
 		{521FD0FA-1D49-468F-84CF-B3348508D624}.Debug|x86.Build.0 = Debug|Win32
+		{521FD0FA-1D49-468F-84CF-B3348508D624}.Release|ARM64.ActiveCfg = Release|ARM64
+		{521FD0FA-1D49-468F-84CF-B3348508D624}.Release|ARM64.Build.0 = Release|ARM64
 		{521FD0FA-1D49-468F-84CF-B3348508D624}.Release|x64.ActiveCfg = Release|x64
 		{521FD0FA-1D49-468F-84CF-B3348508D624}.Release|x64.Build.0 = Release|x64
 		{521FD0FA-1D49-468F-84CF-B3348508D624}.Release|x86.ActiveCfg = Release|Win32

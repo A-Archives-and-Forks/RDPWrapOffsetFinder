@@ -1,4 +1,4 @@
-#include <iostream>
+#include <stdio.h>
 #include <windows.h>
 #include <Dbghelp.h>
 #include <Zydis/Zydis.h>
@@ -19,6 +19,12 @@ void LocalOnlyPatch(ZydisDecoder* decoder, size_t RVA, size_t base, size_t targe
 void DefPolicyPatch(ZydisDecoder* decoder, size_t RVA, size_t base);
 
 int SingleUserPatch(ZydisDecoder* decoder, size_t RVA, size_t base, size_t target, size_t target2);
+
+void LocalOnlyPatchARM64(size_t RVA, size_t base, size_t target);
+
+void DefPolicyPatchARM64(size_t RVA, size_t base);
+
+int SingleUserPatchARM64(size_t RVA, size_t base, size_t target, size_t target2);
 
 bool SLPolicyCP(ZydisDecoder* decoder, size_t RVA, size_t base) {
     ZyanUSize length = 128;
@@ -74,13 +80,24 @@ int main()
     auto pDos = (PIMAGE_DOS_HEADER)(base);
     auto pNT = (PIMAGE_NT_HEADERS64)(base + pDos->e_lfanew);
     auto pSection = IMAGE_FIRST_SECTION(pNT);
-    base += (size_t)pSection->PointerToRawData - pSection->VirtualAddress;
+
+    for (DWORD i = 0; i < pNT->FileHeader.NumberOfSections; i++) {
+        if (!memcmp(pSection[i].Name, ".text", 5)) {
+            base += (size_t)pSection[i].PointerToRawData - pSection[i].VirtualAddress;
+            break;
+        }
+    }
 
     size_t ImageBase;
     DWORD SizeOfImage;
     const char* arch = "x64";
     ZydisDecoder decoder;
-    if (pNT->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+    if (pNT->FileHeader.Machine == IMAGE_FILE_MACHINE_ARM64) {
+        arch = "arm64";
+        ImageBase = (size_t)pNT->OptionalHeader.ImageBase;
+        SizeOfImage = pNT->OptionalHeader.SizeOfImage;
+    }
+    else if (pNT->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
         ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
         ImageBase = (size_t)pNT->OptionalHeader.ImageBase;
         SizeOfImage = pNT->OptionalHeader.SizeOfImage;
@@ -114,22 +131,31 @@ int main()
     if (SymFromNameW(hProcess, L"__imp_VerifyVersionInfoW", &symbol) || SymFromNameW(hProcess, L"__imp__VerifyVersionInfoW@16", &symbol))
         VerifyVersion_addr = (size_t)(symbol.Address - symbol.ModBase);
 
-    if (decoder.stack_width == ZYDIS_STACK_WIDTH_32) VerifyVersion_addr += ImageBase;
-
     SymSetOptions(SYMOPT_DEBUG | SYMOPT_UNDNAME);
-    if (SymFromNameW(hProcess, L"memset", &symbol) || SymFromNameW(hProcess, L"_memset", &symbol))
-    {
+    if (SymFromNameW(hProcess, L"memset", &symbol) || SymFromNameW(hProcess, L"_memset", &symbol)) {
         auto target = (size_t)(symbol.Address - symbol.ModBase);
-        if (SymFromNameW(hProcess, L"CSessionArbitrationHelper::IsSingleSessionPerUserEnabled", &symbol) &&
-            SingleUserPatch(&decoder, (size_t)(symbol.Address - symbol.ModBase), base, target, VerifyVersion_addr));
-        else if (SymFromNameW(hProcess, L"CUtils::IsSingleSessionPerUser", &symbol))
-            if(!SingleUserPatch(&decoder, (size_t)(symbol.Address - symbol.ModBase), base, target, VerifyVersion_addr))
-                puts("ERROR: SingleUserPatch not found");
+        if (pNT->FileHeader.Machine == IMAGE_FILE_MACHINE_ARM64) {
+            if (SymFromNameW(hProcess, L"CSessionArbitrationHelper::IsSingleSessionPerUserEnabled", &symbol) &&
+                SingleUserPatchARM64((size_t)(symbol.Address - symbol.ModBase), base, target, VerifyVersion_addr));
+            else if (SymFromNameW(hProcess, L"CUtils::IsSingleSessionPerUser", &symbol))
+                if(!SingleUserPatchARM64((size_t)(symbol.Address - symbol.ModBase), base, target, VerifyVersion_addr))
+                    puts("ERROR: SingleUserPatch not found");
+        } else {
+            if (decoder.stack_width == ZYDIS_STACK_WIDTH_32) VerifyVersion_addr += ImageBase;
+            if (SymFromNameW(hProcess, L"CSessionArbitrationHelper::IsSingleSessionPerUserEnabled", &symbol) &&
+                SingleUserPatch(&decoder, (size_t)(symbol.Address - symbol.ModBase), base, target, VerifyVersion_addr));
+            else if (SymFromNameW(hProcess, L"CUtils::IsSingleSessionPerUser", &symbol))
+                if(!SingleUserPatch(&decoder, (size_t)(symbol.Address - symbol.ModBase), base, target, VerifyVersion_addr))
+                    puts("ERROR: SingleUserPatch not found");
+        }
     }
 
-    if (SymFromNameW(hProcess, L"CDefPolicy::Query", &symbol))
-        DefPolicyPatch(&decoder, (size_t)(symbol.Address - symbol.ModBase), base);
-    else puts("ERROR: CDefPolicy_Query not found");
+    if (SymFromNameW(hProcess, L"CDefPolicy::Query", &symbol)) {
+        if (pNT->FileHeader.Machine == IMAGE_FILE_MACHINE_ARM64)
+            DefPolicyPatchARM64((size_t)(symbol.Address - symbol.ModBase), base);
+        else
+            DefPolicyPatch(&decoder, (size_t)(symbol.Address - symbol.ModBase), base);
+    } else puts("ERROR: CDefPolicy_Query not found");
 
     if (hResData->Value.dwFileVersionMS <= 0x00060001) ExitProcess(0);
 
@@ -153,14 +179,21 @@ int main()
     if (SymFromNameW(hProcess, L"CEnforcementCore::GetInstanceOfTSLicense", &symbol))
     {
         auto addr = (size_t)(symbol.Address - symbol.ModBase);
-        if (SymFromNameW(hProcess, L"CSLQuery::IsLicenseTypeLocalOnly", &symbol))
-            LocalOnlyPatch(&decoder, addr, base, (size_t)(symbol.Address - symbol.ModBase));
-        else puts("ERROR: IsLicenseTypeLocalOnly not found");
+        if (SymFromNameW(hProcess, L"CSLQuery::IsLicenseTypeLocalOnly", &symbol)) {
+            if (pNT->FileHeader.Machine == IMAGE_FILE_MACHINE_ARM64)
+                LocalOnlyPatchARM64(addr, base, (size_t)(symbol.Address - symbol.ModBase));
+            else
+                LocalOnlyPatch(&decoder, addr, base, (size_t)(symbol.Address - symbol.ModBase));
+        } else puts("ERROR: IsLicenseTypeLocalOnly not found");
     } else puts("ERROR: GetInstanceOfTSLicense not found");
 
     if (SymFromNameW(hProcess, L"CSLQuery::Initialize", &symbol))
     {
-        printf(decoder.stack_width == ZYDIS_STACK_WIDTH_64
+        printf(pNT->FileHeader.Machine == IMAGE_FILE_MACHINE_ARM64
+            ? "SLInitHook.arm64=1\n"
+            "SLInitOffset.arm64=%llX\n"
+            "SLInitFunc.arm64=New_CSLQuery_Initialize\n"
+            : decoder.stack_width == ZYDIS_STACK_WIDTH_64
             ? "SLInitHook.x64=1\n"
             "SLInitOffset.x64=%llX\n"
             "SLInitFunc.x64=New_CSLQuery_Initialize\n"

@@ -1,5 +1,4 @@
-#include <iostream>
-#include <windows.h>
+#include <stdio.h>
 #include <Zydis/Zydis.h>
 
 void LocalOnlyPatch(ZydisDecoder* decoder, size_t RVA, size_t base, size_t target) {
@@ -21,7 +20,7 @@ void LocalOnlyPatch(ZydisDecoder* decoder, size_t RVA, size_t base, size_t targe
                 operands[1].reg.value == ZYDIS_REGISTER_EIP) &&
             target == IP + operands[0].imm.value.u)
         {
-            while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(decoder, (void*)IP, length, &instruction, operands)) && instruction.mnemonic == ZYDIS_MNEMONIC_MOV) {
+            while (ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(decoder, (ZydisDecoderContext*)0, (void*)IP, length, &instruction)) && instruction.mnemonic == ZYDIS_MNEMONIC_MOV) {
                 IP += instruction.length;
                 length -= instruction.length;
             }

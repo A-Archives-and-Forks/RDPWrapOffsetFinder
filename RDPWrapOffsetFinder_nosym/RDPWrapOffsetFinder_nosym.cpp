@@ -1,7 +1,7 @@
-#include <stdlib.h>
 #include <stdio.h>
 #include <windows.h>
 #include <Zydis/Zydis.h>
+#include "aarch64_ic.h"
 
 constexpr const char Query[] = "CDefPolicy::Query";
 constexpr const char LocalOnly[] = "CSLQuery::IsTerminalTypeLocalOnly";
@@ -50,10 +50,10 @@ typedef struct _UNWIND_INFO {
     //    OPTIONAL ULONG ExceptionData[];
 } UNWIND_INFO, * PUNWIND_INFO;
 
-#ifndef _WIN64
+#ifndef _AMD64_
 #define RUNTIME_FUNCTION_INDIRECT 0x1
 #define UNW_FLAG_CHAININFO      0x4
-#endif // _WIN64
+#endif // _AMD64_
 
 typedef struct range_node {
     size_t start;
@@ -231,9 +231,39 @@ size_t searchXref(ZydisDecoder* decoder, size_t base, PIMAGE_AMD64_RUNTIME_FUNCT
     return 0;
 }
 
+size_t searchXrefARM64(size_t base, PIMAGE_ARM64_RUNTIME_FUNCTION_ENTRY func, size_t target)
+{
+    size_t IP = base + func->BeginAddress;
+    size_t endIP;
+    if (func->Flag == PdataRefToFullXdata) {
+        auto xdata = (IMAGE_ARM64_RUNTIME_FUNCTION_ENTRY_XDATA*)(base + (func->UnwindData & ~3));
+        endIP = IP + ((xdata->HeaderData & 0x3FFFF) << 2);
+    }
+    else endIP = IP + (func->UnwindData & 0x1FFC);
+
+    while (IP + 8 <= endIP) {
+        uint32_t ic = *((uint32_t*)IP);
+        if (is_arm64_adrp(ic)) {
+#ifndef _WIN64
+            size_t addr = (ic & 0xFFFFE0) << 9 | (ic & 0x60000000) >> 17;
+#else
+            size_t addr = ((int64_t)(ic & 0xFFFFE0)) << 40 >> 31 | (ic & 0x60000000) >> 17;
+#endif
+            uint32_t rd = get_rt_rd(ic);
+            addr += (IP - base) & ~(size_t)0xFFF;
+            IP += 4;
+            ic = *((uint32_t*)IP);
+            if (!is_arm64_add64(ic) || get_shift(ic) || rd != get_rn(ic)) continue;
+            if (addr + (get_imm12(ic) >> 10) == target) return IP - base;
+        }
+        IP += 4;
+    }
+    return 0;
+}
+
 PIMAGE_AMD64_RUNTIME_FUNCTION_ENTRY backtrace(size_t base, PIMAGE_AMD64_RUNTIME_FUNCTION_ENTRY func) {
     if (func->UnwindData & RUNTIME_FUNCTION_INDIRECT)
-        func = (PIMAGE_AMD64_RUNTIME_FUNCTION_ENTRY)(base + func->UnwindData & ~3);
+        func = (PIMAGE_AMD64_RUNTIME_FUNCTION_ENTRY)(base + (func->UnwindData & ~3));
 
     auto unwindInfo = (PUNWIND_INFO)(base + func->UnwindData);
     while (unwindInfo->Flags & UNW_FLAG_CHAININFO)
@@ -242,6 +272,60 @@ PIMAGE_AMD64_RUNTIME_FUNCTION_ENTRY backtrace(size_t base, PIMAGE_AMD64_RUNTIME_
         unwindInfo = (PUNWIND_INFO)(base + func->UnwindData);
     }
 
+    return func;
+}
+
+PIMAGE_ARM64_RUNTIME_FUNCTION_ENTRY backtraceARM64(size_t base, PIMAGE_ARM64_RUNTIME_FUNCTION_ENTRY func, PIMAGE_ARM64_RUNTIME_FUNCTION_ENTRY FunctionTable, DWORD FunctionTableSize) {
+    if (func->Flag == PdataPackedUnwindFunction)
+        return func;
+
+    size_t IP;
+    if (func->Flag == PdataRefToFullXdata) {
+        auto xdata = (IMAGE_ARM64_RUNTIME_FUNCTION_ENTRY_XDATA*)(base + (func->UnwindData & ~3));
+        if (xdata->HeaderData & 0x7E00000) return func;
+        IP = base + func->BeginAddress + ((xdata->HeaderData & 0x3FFFF) << 2) - 4;
+    }
+    else IP = base + func->BeginAddress + (func->UnwindData & 0x1FFC) - 4;
+
+    size_t length = 32;
+    while (length >= 4) {
+        uint32_t ic = *((uint32_t*)IP);
+        size_t target;
+        if (is_arm64_b(ic))
+            target = IP + get_imm26(ic) - base;
+        else if (is_arm64_bl(ic)) {
+            auto rn = get_rn(ic);
+            IP -= 4;
+            ic = *((uint32_t*)IP);
+            if (!is_arm64_add64(ic) || get_shift(ic) || rn != get_rt_rd(ic)) return func;
+            target = get_imm12(ic) >> 10;
+            rn = get_rn(ic);
+            IP -= 4;
+            ic = *((uint32_t*)IP);
+            if (!is_arm64_adrp(ic) || rn != get_rt_rd(ic)) return func;
+#ifndef _WIN64
+            target += (ic & 0xFFFFE0) << 9 | (ic & 0x60000000) >> 17;
+#else
+            target += ((int64_t)(ic & 0xFFFFE0)) << 40 >> 31 | (ic & 0x60000000) >> 17;
+#endif
+            target += (IP - base) & ~(size_t)0xFFF;
+        }
+        else {
+            IP -= 4;
+            length -= 4;
+            continue;
+        }
+
+        DWORD low = 0, high = FunctionTableSize;
+        while (low <= high) {
+            DWORD mid = (low + high) / 2;
+            if ((FunctionTable + mid)->BeginAddress < target)
+                low = mid + 1;
+            else
+                high = mid - 1;
+        }
+        return FunctionTable + low - 1;
+    }
     return func;
 }
 
@@ -281,6 +365,12 @@ void LocalOnlyPatch(ZydisDecoder* decoder, size_t RVA, size_t base, size_t targe
 void DefPolicyPatch(ZydisDecoder* decoder, size_t RVA, size_t base);
 
 int SingleUserPatch(ZydisDecoder* decoder, size_t RVA, size_t base, size_t target, size_t target2);
+
+void LocalOnlyPatchARM64(size_t RVA, size_t base, size_t target);
+
+void DefPolicyPatchARM64(size_t RVA, size_t base);
+
+int SingleUserPatchARM64(size_t RVA, size_t base, size_t target, size_t target2);
 
 int main()
 {
@@ -360,32 +450,72 @@ int main()
         if (import_krnl32) VerifyVersion_addr = findImportFunction(import_krnl32, base, "VerifyVersionInfoW");
 
         auto pExceptionDirectory = pNT->OptionalHeader.DataDirectory + IMAGE_DIRECTORY_ENTRY_EXCEPTION;
-        auto FunctionTable = (PIMAGE_AMD64_RUNTIME_FUNCTION_ENTRY)(base + pExceptionDirectory->VirtualAddress);
-        auto FunctionTableSize = pExceptionDirectory->Size / (DWORD)sizeof(IMAGE_AMD64_RUNTIME_FUNCTION_ENTRY);
-        if (!FunctionTableSize) ExitProcess(-3);
 
-        ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
-        for (DWORD i = 0; i < FunctionTableSize; i++) {
-            if (!CDefPolicy_Query_addr && searchXref(&decoder, base, FunctionTable + i, CDefPolicy_Query))
-                CDefPolicy_Query_addr = backtrace(base, FunctionTable + i)->BeginAddress;
-            else if (!GetInstanceOfTSLicense_addr && searchXref(&decoder, base, FunctionTable + i, GetInstanceOfTSLicense))
-                GetInstanceOfTSLicense_addr = backtrace(base, FunctionTable + i)->BeginAddress;
-            else if (!IsSingleSessionPerUserEnabled_addr && searchXref(&decoder, base, FunctionTable + i, IsSingleSessionPerUserEnabled))
-                IsSingleSessionPerUserEnabled_addr = backtrace(base, FunctionTable + i)->BeginAddress;
-            else if (!IsSingleSessionPerUser_addr && searchXref(&decoder, base, FunctionTable + i, IsSingleSessionPerUser))
-                IsSingleSessionPerUser_addr = backtrace(base, FunctionTable + i)->BeginAddress;
-            else if (!IsLicenseTypeLocalOnly_addr && searchXref(&decoder, base, FunctionTable + i, IsLicenseTypeLocalOnly))
-                IsLicenseTypeLocalOnly_addr = backtrace(base, FunctionTable + i)->BeginAddress;
-            else if (!CSLQuery_Initialize_addr && (bRemoteConnAllowed_xref = searchXref(&decoder, base, FunctionTable + i, bRemoteConnAllowed))) {
-                auto CSLQuery_Initialize_func = backtrace(base, FunctionTable + i);
-                CSLQuery_Initialize_addr = CSLQuery_Initialize_func->BeginAddress;
-                CSLQuery_Initialize_len = CSLQuery_Initialize_func->EndAddress - CSLQuery_Initialize_func->BeginAddress;
+        if (pNT->FileHeader.Machine == IMAGE_FILE_MACHINE_ARM64) {
+            arch = "arm64";
+            auto FunctionTable = (PIMAGE_ARM64_RUNTIME_FUNCTION_ENTRY)(base + pExceptionDirectory->VirtualAddress);
+            auto FunctionTableSize = pExceptionDirectory->Size / (DWORD)sizeof(IMAGE_ARM64_RUNTIME_FUNCTION_ENTRY);
+            if (!FunctionTableSize) ExitProcess(-3);
+            for (DWORD i = 0; i < FunctionTableSize; i++) {
+                if (FunctionTable[i].BeginAddress == 0 || FunctionTable[i].BeginAddress >= 0xFFFFFFF0) continue;
+                if (!CDefPolicy_Query_addr && searchXrefARM64(base, FunctionTable + i, CDefPolicy_Query)) {
+                    auto bt = backtraceARM64(base, FunctionTable + i, FunctionTable, FunctionTableSize);
+                    CDefPolicy_Query_addr = bt->BeginAddress;
+                }
+                else if (!GetInstanceOfTSLicense_addr && searchXrefARM64(base, FunctionTable + i, GetInstanceOfTSLicense)) {
+                    auto bt = backtraceARM64(base, FunctionTable + i, FunctionTable, FunctionTableSize);
+                    GetInstanceOfTSLicense_addr = bt->BeginAddress;
+                }
+                else if (!IsSingleSessionPerUserEnabled_addr && searchXrefARM64(base, FunctionTable + i, IsSingleSessionPerUserEnabled)) {
+                    auto bt = backtraceARM64(base, FunctionTable + i, FunctionTable, FunctionTableSize);
+                    IsSingleSessionPerUserEnabled_addr = bt->BeginAddress;
+                }
+                else if (!IsSingleSessionPerUser_addr && searchXrefARM64(base, FunctionTable + i, IsSingleSessionPerUser)) {
+                    auto bt = backtraceARM64(base, FunctionTable + i, FunctionTable, FunctionTableSize);
+                    IsSingleSessionPerUser_addr = bt->BeginAddress;
+                }
+                else if (!IsLicenseTypeLocalOnly_addr && searchXrefARM64(base, FunctionTable + i, IsLicenseTypeLocalOnly)) {
+                    auto bt = backtraceARM64(base, FunctionTable + i, FunctionTable, FunctionTableSize);
+                    IsLicenseTypeLocalOnly_addr = bt->BeginAddress;
+                }
+                else if (!CSLQuery_Initialize_addr && (bRemoteConnAllowed_xref = searchXrefARM64(base, FunctionTable + i, bRemoteConnAllowed))) {
+                    auto CSLQuery_Initialize_func = backtraceARM64(base, FunctionTable + i, FunctionTable, FunctionTableSize);
+                    CSLQuery_Initialize_addr = CSLQuery_Initialize_func->BeginAddress;
+                    if (CSLQuery_Initialize_func->Flag == PdataRefToFullXdata) {
+                        auto xdata = (IMAGE_ARM64_RUNTIME_FUNCTION_ENTRY_XDATA*)(base + (CSLQuery_Initialize_func->UnwindData & ~3));
+                        CSLQuery_Initialize_len = (xdata->HeaderData & 0x3FFFF) << 2;
+                    }
+                    else CSLQuery_Initialize_len = CSLQuery_Initialize_func->UnwindData & 0x1FFC;
+                }
+                if (CDefPolicy_Query_addr && GetInstanceOfTSLicense_addr && IsSingleSessionPerUserEnabled_addr &&
+                    IsSingleSessionPerUser_addr && IsLicenseTypeLocalOnly_addr && CSLQuery_Initialize_addr) break;
             }
-            if (CDefPolicy_Query_addr && GetInstanceOfTSLicense_addr && IsSingleSessionPerUserEnabled_addr &&
-                IsSingleSessionPerUser_addr && IsLicenseTypeLocalOnly_addr && CSLQuery_Initialize_addr) break;
+        } else {
+            auto FunctionTable = (PIMAGE_AMD64_RUNTIME_FUNCTION_ENTRY)(base + pExceptionDirectory->VirtualAddress);
+            auto FunctionTableSize = pExceptionDirectory->Size / (DWORD)sizeof(IMAGE_AMD64_RUNTIME_FUNCTION_ENTRY);
+            if (!FunctionTableSize) ExitProcess(-3);
+            ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
+            for (DWORD i = 0; i < FunctionTableSize; i++) {
+                if (!CDefPolicy_Query_addr && searchXref(&decoder, base, FunctionTable + i, CDefPolicy_Query))
+                    CDefPolicy_Query_addr = backtrace(base, FunctionTable + i)->BeginAddress;
+                else if (!GetInstanceOfTSLicense_addr && searchXref(&decoder, base, FunctionTable + i, GetInstanceOfTSLicense))
+                    GetInstanceOfTSLicense_addr = backtrace(base, FunctionTable + i)->BeginAddress;
+                else if (!IsSingleSessionPerUserEnabled_addr && searchXref(&decoder, base, FunctionTable + i, IsSingleSessionPerUserEnabled))
+                    IsSingleSessionPerUserEnabled_addr = backtrace(base, FunctionTable + i)->BeginAddress;
+                else if (!IsSingleSessionPerUser_addr && searchXref(&decoder, base, FunctionTable + i, IsSingleSessionPerUser))
+                    IsSingleSessionPerUser_addr = backtrace(base, FunctionTable + i)->BeginAddress;
+                else if (!IsLicenseTypeLocalOnly_addr && searchXref(&decoder, base, FunctionTable + i, IsLicenseTypeLocalOnly))
+                    IsLicenseTypeLocalOnly_addr = backtrace(base, FunctionTable + i)->BeginAddress;
+                else if (!CSLQuery_Initialize_addr && (bRemoteConnAllowed_xref = searchXref(&decoder, base, FunctionTable + i, bRemoteConnAllowed))) {
+                    auto CSLQuery_Initialize_func = backtrace(base, FunctionTable + i);
+                    CSLQuery_Initialize_addr = CSLQuery_Initialize_func->BeginAddress;
+                    CSLQuery_Initialize_len = CSLQuery_Initialize_func->EndAddress - CSLQuery_Initialize_func->BeginAddress;
+                }
+                if (CDefPolicy_Query_addr && GetInstanceOfTSLicense_addr && IsSingleSessionPerUserEnabled_addr &&
+                    IsSingleSessionPerUser_addr && IsLicenseTypeLocalOnly_addr && CSLQuery_Initialize_addr) break;
+            }
         }
-    }
-    else {
+    } else {
         ImageBase = ((PIMAGE_NT_HEADERS32)pNT)->OptionalHeader.ImageBase;
         memset_addr = findImportFunction32(import_msvcrt, base, "memset") + ImageBase;
         if (import_krnl32) VerifyVersion_addr = findImportFunction32(import_krnl32, base, "VerifyVersionInfoW") + ImageBase;
@@ -484,18 +614,28 @@ int main()
     printf("[%hu.%hu.%hu.%hu]\n", HIWORD(hResData->Value.dwFileVersionMS), LOWORD(hResData->Value.dwFileVersionMS),
         HIWORD(hResData->Value.dwFileVersionLS), LOWORD(hResData->Value.dwFileVersionLS));
 
-    if (memset_addr)
-    {
-        if (IsSingleSessionPerUserEnabled_addr &&
-            SingleUserPatch(&decoder, IsSingleSessionPerUserEnabled_addr, base, memset_addr, VerifyVersion_addr));
-        else if (IsSingleSessionPerUser_addr)
-            if(!SingleUserPatch(&decoder, IsSingleSessionPerUser_addr, base, memset_addr, VerifyVersion_addr))
-                puts("ERROR: SingleUserPatch not found");
+    if (memset_addr) {
+        if (pNT->FileHeader.Machine == IMAGE_FILE_MACHINE_ARM64) {
+            if (IsSingleSessionPerUserEnabled_addr &&
+                SingleUserPatchARM64(IsSingleSessionPerUserEnabled_addr, base, memset_addr, VerifyVersion_addr));
+            else if (IsSingleSessionPerUser_addr)
+                if(!SingleUserPatchARM64(IsSingleSessionPerUser_addr, base, memset_addr, VerifyVersion_addr))
+                    puts("ERROR: SingleUserPatch not found");
+        } else {
+            if (IsSingleSessionPerUserEnabled_addr &&
+                SingleUserPatch(&decoder, IsSingleSessionPerUserEnabled_addr, base, memset_addr, VerifyVersion_addr));
+            else if (IsSingleSessionPerUser_addr)
+                if(!SingleUserPatch(&decoder, IsSingleSessionPerUser_addr, base, memset_addr, VerifyVersion_addr))
+                    puts("ERROR: SingleUserPatch not found");
+        }
     }
 
-    if (CDefPolicy_Query_addr)
-        DefPolicyPatch(&decoder, CDefPolicy_Query_addr, base);
-    else puts("ERROR: CDefPolicy_Query not found");
+    if (CDefPolicy_Query_addr) {
+        if (pNT->FileHeader.Machine == IMAGE_FILE_MACHINE_ARM64)
+            DefPolicyPatchARM64(CDefPolicy_Query_addr, base);
+        else
+            DefPolicyPatch(&decoder, CDefPolicy_Query_addr, base);
+    } else puts("ERROR: CDefPolicy_Query not found");
 
     if (hResData->Value.dwFileVersionMS <= 0x00060001) ExitProcess(0);
 
@@ -529,21 +669,27 @@ int main()
                     "SLPolicyOffset.x86=%IX\n"
                     "SLPolicyFunc.x86=%s\n", IP + (size_t)operands[0].imm.value.u - base, func);
                 return 0;
-            } 
+            }
         }
 
         puts("ERROR: SLGetWindowsInformationDWORDWrapper not found");
         ExitProcess(0);
     }
 
-    if (GetInstanceOfTSLicense_addr)
-    {
-        if (IsLicenseTypeLocalOnly_addr)
-            LocalOnlyPatch(&decoder, GetInstanceOfTSLicense_addr, base, IsLicenseTypeLocalOnly_addr);
-        else puts("ERROR: IsLicenseTypeLocalOnly not found");
+    if (GetInstanceOfTSLicense_addr) {
+        if (IsLicenseTypeLocalOnly_addr) {
+            if (pNT->FileHeader.Machine == IMAGE_FILE_MACHINE_ARM64)
+                LocalOnlyPatchARM64(GetInstanceOfTSLicense_addr, base, IsLicenseTypeLocalOnly_addr);
+            else
+                LocalOnlyPatch(&decoder, GetInstanceOfTSLicense_addr, base, IsLicenseTypeLocalOnly_addr);
+        } else puts("ERROR: IsLicenseTypeLocalOnly not found");
     } else puts("ERROR: GetInstanceOfTSLicense not found");
 
-    printf(decoder.stack_width == ZYDIS_STACK_WIDTH_64
+    printf(pNT->FileHeader.Machine == IMAGE_FILE_MACHINE_ARM64
+        ? "SLInitHook.arm64=1\n"
+        "SLInitOffset.arm64=%lX\n"
+        "SLInitFunc.arm64=New_CSLQuery_Initialize\n"
+        : decoder.stack_width == ZYDIS_STACK_WIDTH_64
         ? "SLInitHook.x64=1\n"
         "SLInitOffset.x64=%lX\n"
         "SLInitFunc.x64=New_CSLQuery_Initialize\n"
@@ -564,7 +710,53 @@ int main()
         bMultimonAllowed_addr = 0, lMaxUserSessions_addr = 0, ulMaxDebugSessions_addr = 0, bInitialized_addr = 0;
     auto current = &bServerSku_addr;
 
-    if (decoder.stack_width == ZYDIS_STACK_WIDTH_32) {
+    if (pNT->FileHeader.Machine == IMAGE_FILE_MACHINE_ARM64) {
+        while (length >= 4) {
+            uint32_t ic = *((uint32_t*)IP);
+            if (is_arm64_adrp(ic)) {
+#ifndef _WIN64
+                size_t target = (ic & 0xFFFFE0) << 9 | (ic & 0x60000000) >> 17;
+#else
+                size_t target = ((int64_t)(ic & 0xFFFFE0)) << 40 >> 31 | (ic & 0x60000000) >> 17;
+#endif
+                uint32_t rd = get_rt_rd(ic);
+                target += (IP - base) & ~(size_t)0xFFF;
+                IP += 4;
+                ic = *((uint32_t*)IP);
+                if (is_arm64_ldr32_unsigned(ic) && 31 == get_rn(ic)) {
+                    uint32_t rt = get_rt_rd(ic);
+                    IP += 4;
+                    ic = *((uint32_t*)IP);
+                    if (is_arm64_str32_unsigned(ic) && rd == get_rn(ic) && rt == get_rt_rd(ic)) {
+                        target += get_imm12(ic) >> 8;
+                        if (!*current) *current = target;
+                    }
+                }
+                else if (is_arm64_add64(ic) && !get_shift(ic) && rd == get_rn(ic)) {
+                    target += get_imm12(ic) >> 10;
+                    if (target == bRemoteConnAllowed) current = &bRemoteConnAllowed_addr;
+                    else if (target == bFUSEnabled) current = &bFUSEnabled_addr;
+                    else if (target == bAppServerAllowed) current = &bAppServerAllowed_addr;
+                    else if (target == bMultimonAllowed) current = &bMultimonAllowed_addr;
+                    else if (target == lMaxUserSessions) current = &lMaxUserSessions_addr;
+                    else if (target == ulMaxDebugSessions) current = &ulMaxDebugSessions_addr;
+                }
+                else if(is_arm64_movz32(ic) && !get_hw(ic) && get_imm16(ic) == 1) {
+                    uint32_t rt = get_rt_rd(ic);
+                    IP += 4;
+                    ic = *((uint32_t*)IP);
+                    if (is_arm64_str32_unsigned(ic) && rd == get_rn(ic) && rt == get_rt_rd(ic)) {
+                        target += get_imm12(ic) >> 8;
+                        bInitialized_addr = target;
+                        break;
+                    }
+                }
+            }
+            IP += 4;
+            length -= 4;
+        }
+    }
+    else if (decoder.stack_width == ZYDIS_STACK_WIDTH_32) {
         while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, (void*)IP, length, &instruction, operands)))
         {
             IP += instruction.length;
