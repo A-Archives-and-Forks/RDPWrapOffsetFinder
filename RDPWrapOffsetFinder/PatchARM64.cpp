@@ -37,7 +37,7 @@ void LocalOnlyPatchARM64(size_t RVA, size_t base, size_t target) {
                 if (is_arm64_cbz(ic) && IP + get_imm19(ic) == target) {
                     printf("LocalOnlyPatch.arm64=1\n"
                         "LocalOnlyOffset.arm64=%IX\n"
-                        "LocalOnlyCode.arm64=B_44\n", IP - base);
+                        "LocalOnlyCode.arm64=B_%d\n", IP - base, get_imm19(ic));
                     return;
                 }
             } while (length >= 4);
